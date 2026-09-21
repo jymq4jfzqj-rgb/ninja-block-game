@@ -214,6 +214,7 @@
     <div class="stats"><div class="stat"><span class="stat-label">てん</span><strong class="stat-value" id="score">0</strong></div><div class="stat"><span class="stat-label">つぎ</span><div class="next-block red" id="nextBlock" aria-label="つぎは あか"></div></div></div>
     <div class="board-wrap"><div class="board" id="board" role="grid" aria-label="5かける5のゲームばん"></div></div>
     <p class="message" id="message" role="status" aria-live="polite">あいている マスを タップ！</p>
+    <p id="audioNotice" role="status" hidden>音を開始できませんでした。<button class="save-button" id="retryAudioButton">音をためす</button></p>
     <button class="end-button" id="resetButton">リセット</button>
   </main>
 
@@ -241,19 +242,58 @@
     if (ms) messageTimer=setTimeout(()=>{$('message').textContent='あいている マスを タップ！';},ms);
   }
   // 音は端末の中で作る。音声ファイルも通信も使わない。
-  function sound(type) {
+  let audioPreparation;
+  function audioUnavailable() {
+    $('audioNotice').hidden=false;
+  }
+  async function prepareAudio() {
+    let context;
     try {
-      audioContext ||= new (window.AudioContext||window.webkitAudioContext)();
-      if (audioContext.state==='suspended') audioContext.resume();
+      if (!audioContext || audioContext.state==='closed') {
+        const AudioEngine=window.AudioContext||window.webkitAudioContext;
+        audioContext=new AudioEngine();
+      }
+      context=audioContext;
+      if (context.state!=='running') {
+        if (!audioPreparation) {
+          // resume はタップ処理の中で呼び、完了してから音を予約する。
+          let timer;
+          const resume=context.resume();
+          audioPreparation=Promise.race([
+            resume,
+            new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Audio timeout')),2500);})
+          ]).finally(()=>{clearTimeout(timer); audioPreparation=undefined;});
+        }
+        await audioPreparation;
+      }
+      if (context.state!=='running') throw new Error('Audio unavailable');
+      $('audioNotice').hidden=true;
+      return context;
+    } catch (_) {
+      audioUnavailable();
+      // 再開できない装置は、次のタップで新しく作り直す。
+      if (context && audioContext===context) {
+        audioContext=undefined;
+        try { Promise.resolve(context.close()).catch(()=>{}); } catch (_) {}
+      }
+      return null;
+    }
+  }
+  async function sound(type) {
+    const context=await prepareAudio();
+    if (!context || document.hidden) return;
+    try {
       const notes = type==='clear'?[523,659,784]:type==='trap'?[260,210]:type==='win'?[523,659,784,1046]:[360];
       notes.forEach((hz,i)=>{
-        const osc=audioContext.createOscillator(), gain=audioContext.createGain();
-        const at=audioContext.currentTime+i*.095;
+        const osc=context.createOscillator(), gain=context.createGain();
+        const at=context.currentTime+.02+i*.095;
         osc.type='sine'; osc.frequency.setValueAtTime(hz,at);
         gain.gain.setValueAtTime(.0001,at); gain.gain.exponentialRampToValueAtTime(.075,at+.012); gain.gain.exponentialRampToValueAtTime(.0001,at+.19);
-        osc.connect(gain).connect(audioContext.destination); osc.start(at); osc.stop(at+.2);
+        osc.connect(gain).connect(context.destination);
+        osc.onended=()=>{osc.disconnect(); gain.disconnect();};
+        osc.start(at); osc.stop(at+.2);
       });
-    } catch (_) { /* 音を出せない端末でもゲームは続ける。 */ }
+    } catch (_) { audioUnavailable(); }
   }
   function save() {
     try { state.scene=sceneForState(); localStorage.setItem(SAVE_KEY,JSON.stringify(state)); return true; }
@@ -459,6 +499,11 @@
     if(!load()) { state=freshState(); enterGame(false); return; }
     $('resetOverlay').hidden=false;
   }
+  // 開始操作のタップで音を準備する。ゲームの開始は待たせない。
+  for (const id of ['startButton','continueButton','retryButton','confirmResetButton']) {
+    $(id).addEventListener('click',()=>{void prepareAudio();});
+  }
+  $('retryAudioButton').addEventListener('click',()=>{void sound('place');});
   $('startButton').addEventListener('click',askReset);
   $('continueButton').addEventListener('click',()=>enterGame(false));
   $('retryButton').addEventListener('click',()=>enterGame(true));
